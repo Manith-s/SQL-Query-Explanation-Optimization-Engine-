@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16
+    container_name: queryexpnopt-db
+    environment:
+      POSTGRES_DB: queryexpnopt
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API service - uncomment for Phase 2+
+  # api:
+  #   build: .
+  #   container_name: queryexpnopt-api
+  #   environment:
+  #     - DB_URL=postgresql://postgres:password@db:5432/queryexpnopt
+  #     - LLM_PROVIDER=dummy
+  #     - APP_ENV=development
+  #   ports:
+  #     - "8000:8000"
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ./src:/app/src
+
+volumes:
+  postgres_data:
