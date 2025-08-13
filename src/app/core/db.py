@@ -26,7 +26,7 @@ def get_conn() -> pg_connection:
         yield conn
     finally:
         if conn is not None:
-            conn.close()
+        conn.close()
 
 def run_sql(sql: str, params: Optional[Tuple] = None, timeout_ms: int = 10000) -> List[Tuple]:
     """
