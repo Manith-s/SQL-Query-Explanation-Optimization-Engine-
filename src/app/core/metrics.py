@@ -18,6 +18,9 @@ _h_latency: Histogram | None = None
 _h_db_explain: Histogram | None = None
 _c_db_errors: Counter | None = None
 _h_llm_latency: Histogram | None = None
+_c_whatif_trials: Counter | None = None
+_h_whatif_trial_seconds: Histogram | None = None
+_c_whatif_filtered: Counter | None = None
 
 
 def _buckets() -> list[float]:
@@ -28,7 +31,7 @@ def _buckets() -> list[float]:
 
 
 def init_metrics() -> None:
-    global _registry, _c_requests, _h_latency, _h_db_explain, _c_db_errors, _h_llm_latency
+    global _registry, _c_requests, _h_latency, _h_db_explain, _c_db_errors, _h_llm_latency, _c_whatif_trials, _h_whatif_trial_seconds, _c_whatif_filtered
     if not settings.METRICS_ENABLED:
         return
     if _registry is not None:
@@ -66,6 +69,22 @@ def init_metrics() -> None:
         buckets=buckets,
         registry=_registry,
     )
+    _c_whatif_trials = Counter(
+        f"{ns}_whatif_trials_total",
+        "What-if (HypoPG) trials executed",
+        registry=_registry,
+    )
+    _h_whatif_trial_seconds = Histogram(
+        f"{ns}_whatif_trial_seconds",
+        "What-if trial duration seconds",
+        buckets=buckets,
+        registry=_registry,
+    )
+    _c_whatif_filtered = Counter(
+        f"{ns}_whatif_filtered_total",
+        "What-if suggestions filtered below min reduction threshold",
+        registry=_registry,
+    )
 
 
 def observe_request(route: str, method: str, status: int, dur_s: float) -> None:
@@ -96,6 +115,20 @@ def observe_llm_latency(seconds: float) -> None:
     if not settings.METRICS_ENABLED or _registry is None:
         return
     _h_llm_latency.observe(max(seconds, 0.0))
+
+
+def observe_whatif_trial(seconds: float) -> None:
+    if not settings.METRICS_ENABLED or _registry is None:
+        return
+    _c_whatif_trials.inc()
+    _h_whatif_trial_seconds.observe(max(seconds, 0.0))
+
+
+def count_whatif_filtered(n: int) -> None:
+    if not settings.METRICS_ENABLED or _registry is None:
+        return
+    if n > 0:
+        _c_whatif_filtered.inc(n)
 
 
 def metrics_exposition() -> tuple[bytes, str]:

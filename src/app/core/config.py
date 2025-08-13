@@ -20,7 +20,7 @@ class Settings:
     # when using raw psycopg2, we'll strip the +psycopg2.
     DB_URL: str = os.getenv(
         "DB_URL",
-        "postgresql+psycopg2://postgres:password@localhost:5432/queryexpnopt",
+        "postgresql+psycopg2://postgres:password@localhost:5433/queryexpnopt",
     )
 
     # LLM configuration
@@ -49,6 +49,11 @@ class Settings:
     METRICS_ENABLED: bool = os.getenv("METRICS_ENABLED", "false").lower() == "true"
     METRICS_NAMESPACE: str = os.getenv("METRICS_NAMESPACE", "qeo")
     METRICS_BUCKETS: str = os.getenv("METRICS_BUCKETS", "0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2,5")
+
+    # What-if (HypoPG) evaluator configuration
+    WHATIF_ENABLED: bool = os.getenv("WHATIF_ENABLED", "false").lower() == "true"
+    WHATIF_MAX_TRIALS: int = int(os.getenv("WHATIF_MAX_TRIALS", "10"))
+    WHATIF_MIN_COST_REDUCTION_PCT: float = float(os.getenv("WHATIF_MIN_COST_REDUCTION_PCT", "5"))
 
     # SQL Linting configuration
     LARGE_TABLE_PATTERNS: List[str] = [

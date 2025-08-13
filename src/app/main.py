@@ -14,7 +14,7 @@ from app.core.metrics import init_metrics, observe_request, metrics_exposition
 app = FastAPI(
     title="SQL Query Explanation & Optimization Engine",
     description="A local, offline-capable tool for SQL analysis, explanation, and optimization",
-    version="0.6.0",
+    version="0.7.0",
 )
 
 # CORS middleware for development
@@ -94,7 +94,7 @@ async def root():
     """Root endpoint with basic project info."""
     return {
         "name": "SQL Query Explanation & Optimization Engine",
-        "version": "0.6.0",
+        "version": "0.7.0",
         "status": "running",
         "docs": "/docs"
     }

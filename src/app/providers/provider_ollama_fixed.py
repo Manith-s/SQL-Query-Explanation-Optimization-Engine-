@@ -120,3 +120,4 @@ class OllamaLLMProvider(LLMProvider):
             return response.status_code == 200
         except:
             return False
+

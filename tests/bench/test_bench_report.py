@@ -13,3 +13,4 @@ def test_bench_reports_exist():
     data = json.loads((base / "report.json").read_text(encoding="utf-8"))
     assert "cases" in data
 
+

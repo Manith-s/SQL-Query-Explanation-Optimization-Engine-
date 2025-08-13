@@ -12,6 +12,7 @@ import sys
 from typing import Any, Dict
 
 from app.core import sql_analyzer, plan_heuristics, db
+from app.core import whatif
 
 
 def _print(data: Dict[str, Any], fmt: str) -> None:
@@ -74,13 +75,29 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         "max_index_cols": args.max_index_cols,
     }
     result = opt_analyze(sql, info, plan, schema, stats, options)
+    suggestions = result.get("suggestions", [])[: args.top_k]
+
+    ranking = "heuristic"
+    whatif_info = {"enabled": False, "available": False, "trials": 0, "filteredByPct": 0}
+    if args.what_if:
+        try:
+            wi = whatif.evaluate(sql, suggestions, timeout_ms=args.timeout_ms)
+            ranking = wi.get("ranking", ranking)
+            whatif_info = wi.get("whatIf", whatif_info)
+            suggestions = wi.get("suggestions", suggestions)
+        except Exception:
+            ranking = "heuristic"
+            whatif_info = {"enabled": True, "available": False, "trials": 0, "filteredByPct": 0}
+
     out = {
         "ok": True,
         "message": "ok",
-        "suggestions": result.get("suggestions", [])[: args.top_k],
+        "suggestions": suggestions,
         "summary": result.get("summary", {}),
         "plan_warnings": warnings,
         "plan_metrics": metrics,
+        "ranking": ranking,
+        "whatIf": whatif_info,
     }
     _print(out, args.format)
     return 0
@@ -123,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--top-k", type=int, default=10)
     opt.add_argument("--min-rows-for-index", type=int, default=10000)
     opt.add_argument("--max-index-cols", type=int, default=3)
+    opt.add_argument("--what-if", dest="what_if", action="store_true", help="Enable HypoPG cost-based what-if evaluation")
+    opt.add_argument("--no-what-if", dest="what_if", action="store_false")
+    opt.set_defaults(what_if=False)
     opt.set_defaults(func=cmd_optimize)
 
     return p

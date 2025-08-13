@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, conint
 from app.core import db, sql_analyzer, plan_heuristics
 from app.core.config import settings
 from app.core.optimizer import analyze as optimizer_analyze
+from app.core import whatif
 
 
 router = APIRouter()
@@ -31,6 +32,8 @@ class OptimizeResponse(BaseModel):
     message: str = "ok"
     suggestions: List[Dict[str, Any]] = Field(default_factory=list)
     summary: Dict[str, Any] = Field(default_factory=dict)
+    ranking: Literal["cost_based", "heuristic"] = "heuristic"
+    whatIf: Dict[str, Any] = Field(default_factory=dict)
     plan_warnings: List[Dict[str, Any]] = Field(default_factory=list)
     plan_metrics: Dict[str, Any] = Field(default_factory=dict)
     advisorsRan: List[str] = Field(default_factory=list)
@@ -136,11 +139,27 @@ async def optimize_sql(request: OptimizeRequest) -> OptimizeResponse:
         suggestions = result.get("suggestions", [])[: server_top_k]
         summary = result.get("summary", {})
 
+        # Optional what-if (HypoPG) ranking/evaluation
+        ranking = "heuristic"
+        whatif_info: Dict[str, Any] = {"enabled": False, "available": False, "trials": 0, "filteredByPct": 0}
+        if settings.WHATIF_ENABLED:
+            try:
+                wi = whatif.evaluate(request.sql, suggestions, timeout_ms=request.timeout_ms)
+                ranking = wi.get("ranking", ranking)
+                whatif_info = wi.get("whatIf", whatif_info)
+                suggestions = wi.get("suggestions", suggestions)
+            except Exception:
+                # Graceful fallback
+                ranking = "heuristic"
+                whatif_info = {"enabled": True, "available": False, "trials": 0, "filteredByPct": 0}
+
         return OptimizeResponse(
             ok=True,
             message="stub: optimize ok",
             suggestions=suggestions,
             summary=summary,
+            ranking=ranking,
+            whatIf=whatif_info,
             plan_warnings=plan_warnings,
             plan_metrics=plan_metrics,
             advisorsRan=["rewrite", "index"],

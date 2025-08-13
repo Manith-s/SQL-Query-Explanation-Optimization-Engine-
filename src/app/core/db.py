@@ -93,6 +93,27 @@ def run_explain(sql: str, analyze: bool = False, timeout_ms: int = 10000) -> Dic
             except Exception as e:
                 raise Exception(f"EXPLAIN failed: {str(e)}")
 
+def run_explain_costs(sql: str, timeout_ms: int = 10000) -> Dict:
+    """
+    Run EXPLAIN with costs enabled (no analyze, no timing) and return plan JSON.
+    """
+    explain_sql = f"EXPLAIN (FORMAT JSON, COSTS ON, TIMING OFF) {sql}"
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+            cur.execute(explain_sql)
+            result = cur.fetchone()
+            if isinstance(result[0], str):
+                plan_json = json.loads(result[0])
+            else:
+                plan_json = result[0]
+            plan_obj = plan_json[0] if isinstance(plan_json, list) and plan_json else plan_json
+            if isinstance(plan_obj, dict) and "Plan" in plan_obj:
+                return plan_obj
+            if isinstance(plan_obj, dict):
+                return {"Plan": plan_obj}
+            return {"Plan": {}}
+
 def fetch_schema(schema: str = "public", table: Optional[str] = None) -> Dict:
     """
     Fetch database schema information using information_schema views.
