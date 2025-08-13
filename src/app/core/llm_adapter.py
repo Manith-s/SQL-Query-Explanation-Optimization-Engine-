@@ -1,64 +1,102 @@
 """
-LLM adapter interface and factory.
+LLM provider interface and factory.
 
-Provides abstract interface for LLM providers and factory to instantiate them.
+This module provides a common interface for LLM providers and a factory
+to instantiate the configured provider.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Optional, Dict, Any
+import importlib
 
-from app.providers.provider_dummy import DummyLLMProvider
-from app.providers.provider_ollama import OllamaLLMProvider
-
+import os
+from app.core.config import settings
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
     
     @abstractmethod
-    def generate(self, prompt: str, **kwargs) -> str:
+    def complete(self, prompt: str, system: Optional[str] = None) -> str:
         """
-        Generate text response from prompt.
+        Generate completion for a prompt with optional system context.
         
         Args:
-            prompt: The input prompt to send to the LLM
-            **kwargs: Additional provider-specific parameters
+            prompt: The prompt to complete
+            system: Optional system context/instruction
+        
+        Returns:
+            Generated completion text
             
-        Returns:
-            Generated text response
-        """
-        pass
-    
-    @abstractmethod
-    def is_available(self) -> bool:
-        """
-        Check if the LLM provider is available.
-        
-        Returns:
-            True if provider can be used, False otherwise
+        Raises:
+            Exception: If completion fails
         """
         pass
 
-
-def get_llm(provider_name: Optional[str] = None) -> LLMProvider:
+def get_llm() -> LLMProvider:
     """
-    Factory function to get LLM provider instance.
+    Get the configured LLM provider instance.
     
-    Args:
-        provider_name: Name of the provider to use. If None, uses default.
-        
+    The provider is determined by settings.LLM_PROVIDER:
+    - "dummy": Returns fixed responses (for testing)
+    - "ollama": Uses local Ollama server
+    
     Returns:
-        LLM provider instance
-    """
-    if provider_name is None:
-        provider_name = "dummy"
+        LLMProvider instance
     
-    providers = {
-        "dummy": DummyLLMProvider,
-        "ollama": OllamaLLMProvider,
+    Raises:
+        ValueError: If provider not found or initialization fails
+    """
+    provider_map = {
+        "dummy": "app.providers.provider_dummy",
+        "ollama": "app.providers.provider_ollama"
     }
     
-    provider_class = providers.get(provider_name.lower())
-    if provider_class is None:
-        raise ValueError(f"Unknown LLM provider: {provider_name}")
+    # Always read from env at call time to respect test overrides
+    provider_name = os.getenv("LLM_PROVIDER", "dummy")  # Default to dummy if not set
+    provider_module = provider_map.get(provider_name)
+    if not provider_module:
+        raise ValueError(
+            f"Unknown LLM provider: {provider_name}. "
+            f"Valid options are: {list(provider_map.keys())}"
+        )
     
-    return provider_class()
+    try:
+        # Import the provider module
+        module = importlib.import_module(provider_module)
+        
+        # Get the provider class (assumed to be the only class inheriting from LLMProvider)
+        provider_class = None
+        for attr in dir(module):
+            obj = getattr(module, attr)
+            if (isinstance(obj, type) and 
+                issubclass(obj, LLMProvider) and 
+                obj != LLMProvider):
+                provider_class = obj
+                break
+        
+        if not provider_class:
+            raise ValueError(f"No LLMProvider implementation found in {provider_module}")
+        
+        # Instantiate the provider
+        instance = provider_class()
+        
+        # If ollama selected but unavailable, fallback to dummy
+        if provider_name == "ollama":
+            try:
+                from app.providers.provider_ollama import OllamaLLMProvider as _OL
+                if hasattr(_OL, "is_available") and not _OL.is_available():
+                    # fallback to dummy
+                    module = importlib.import_module(provider_map["dummy"])
+                    for attr in dir(module):
+                        obj = getattr(module, attr)
+                        if (isinstance(obj, type) and issubclass(obj, LLMProvider) and obj != LLMProvider):
+                            return obj()
+            except Exception:
+                pass
+        
+        return instance
+        
+    except Exception as e:
+        raise ValueError(
+            f"Failed to initialize LLM provider '{provider_name}': {str(e)}"
+        )

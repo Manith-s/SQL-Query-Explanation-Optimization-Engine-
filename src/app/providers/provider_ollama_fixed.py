@@ -28,9 +28,9 @@ class OllamaLLMProvider(LLMProvider):
         """Initialize provider with configuration from settings."""
         self.host = settings.OLLAMA_HOST.rstrip("/")
         self.model = settings.LLM_MODEL
-        self.timeout = 60  # Default timeout
+        self.timeout = 30  # Default timeout
         self.max_retries = 2  # Number of retries on timeout
-        self.retry_timeout = 45  # Shorter timeout for retries
+        self.retry_timeout = 15  # Shorter timeout for retries
     
     def complete(self, prompt: str, system: Optional[str] = None) -> str:
         """
@@ -105,18 +105,18 @@ class OllamaLLMProvider(LLMProvider):
         
         # If all attempts failed, raise the last error
         raise Exception(f"All {len(timeouts)} attempts failed. Last error: {str(last_error)}")
-
-    def generate(self, prompt: str) -> str:
-        """Alternate generate API is not implemented for Ollama provider."""
-        raise NotImplementedError("generate() is not implemented for Ollama; use complete().")
     
     @classmethod
     def is_available(cls) -> bool:
-        if os.getenv("RUN_OLLAMA_TESTS") != "1":
-            return False
+        """
+        Check if Ollama server is available.
+        
+        Returns:
+            True if Ollama server responds to version check
+        """
         try:
             host = settings.OLLAMA_HOST.rstrip("/")
-            r = requests.get(f"{host}/api/version", timeout=2)
-            return r.status_code == 200
-        except Exception:
+            response = requests.get(f"{host}/api/version", timeout=2)
+            return response.status_code == 200
+        except:
             return False

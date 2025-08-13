@@ -33,3 +33,27 @@ ignore = [
 
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["F401"]
+
+[project]
+name = "queryexpnopt"
+description = "SQL Query Explanation & Optimization Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Maintainers", email = "maintainers@example.com" }]
+dynamic = ["version"]
+dependencies = [
+  "fastapi>=0.104.1",
+  "uvicorn[standard]>=0.24.0",
+  "psycopg2-binary>=2.9.9",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+  "sqlglot>=19.0.0",
+  "pydantic>=2.5.0",
+]
+
+[project.scripts]
+qeo = "app.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "app.__version__"}

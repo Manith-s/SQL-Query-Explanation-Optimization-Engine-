@@ -1,7 +1,10 @@
 fastapi
 uvicorn
 pydantic
-sqlglot
+sqlglot==27.6.0
 python-dotenv
 pytest
 httpx
+psycopg2-binary
+requests
+prometheus-client
