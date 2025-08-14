@@ -1,46 +1,41 @@
-version: '3.8'
-
 services:
   db:
     build:
       context: .
       dockerfile: docker/db.Dockerfile
-    image: queryexpnopt-postgres:16-hypopg
-    container_name: queryexpnopt-db
-    restart: unless-stopped
     environment:
       POSTGRES_DB: queryexpnopt
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
-      TZ: UTC
-      # optional: initdb args (UTF-8, locale); only used on first run
-      # POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "5433:5432"   # Use port 5433 on host to avoid conflict
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d queryexpnopt"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-queryexpnopt}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - ./infra/init:/docker-entrypoint-initdb.d
+      - ./infra/seed:/docker-entrypoint-initdb.d/seed
 
-  # API (enable when you wire /explain to the DB)
-  # api:
-  #   build: .
-  #   container_name: queryexpnopt-api
-  #   environment:
-  #     DB_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-queryexpnopt}
-  #     LLM_PROVIDER: dummy
-  #     APP_ENV: development
-  #   ports:
-  #     - "8000:8000"
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   volumes:
-  #     - ./src:/app/src:rw
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres_data:

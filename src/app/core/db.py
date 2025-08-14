@@ -6,6 +6,7 @@ utilities for the Query Explain & Optimize engine.
 """
 
 from contextlib import contextmanager
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import psycopg2
@@ -14,19 +15,47 @@ from psycopg2.extras import RealDictCursor
 
 from app.core.config import settings
 
+# Simple opt-in pool & TTL caches (EPIC F)
+_POOL: List[pg_connection] = []
+_CACHE_SCHEMA_TTL_S = int(os.getenv("CACHE_SCHEMA_TTL_S", "0") or 0)
+_SCHEMA_CACHE: Dict[str, Any] = {}
+_SCHEMA_CACHE_TS: Dict[str, float] = {}
+
+# Optional global connection reuse to support TEMP objects across requests in tests
+_global_conn: Optional[pg_connection] = None
+
 @contextmanager
 def get_conn() -> pg_connection:
     """
     Get a PostgreSQL connection with proper error handling and automatic closing.
     Uses connection parameters from settings.DB_URL.
     """
-    conn = None
+    use_global = os.getenv("QEO_GLOBAL_CONN", "1").lower() in ("1", "true", "yes")
+    global _global_conn
+    if use_global:
+        if _global_conn is None or _global_conn.closed:
+            _global_conn = psycopg2.connect(settings.db_url_psycopg)
+        # Do not close global connection on exit to preserve TEMP objects
+        yield _global_conn
+        return
+    # Non-global mode: open/close per context
+    conn_local: Optional[pg_connection] = None
+    # Simple pool reuse
+    pool_min = int(os.getenv("POOL_MINCONN", "1"))
+    pool_max = int(os.getenv("POOL_MAXCONN", "5"))
     try:
-        conn = psycopg2.connect(settings.db_url_psycopg)
-        yield conn
-    finally:
-        if conn is not None:
-        conn.close()
+        if _POOL:
+            conn_local = _POOL.pop()
+        else:
+            conn_local = psycopg2.connect(settings.db_url_psycopg)
+        try:
+            yield conn_local
+        finally:
+            if len(_POOL) < pool_max:
+                _POOL.append(conn_local)
+            else:
+                conn_local.close()
+
 
 def run_sql(sql: str, params: Optional[Tuple] = None, timeout_ms: int = 10000) -> List[Tuple]:
     """
@@ -42,9 +71,27 @@ def run_sql(sql: str, params: Optional[Tuple] = None, timeout_ms: int = 10000) -
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
-            cur.execute(sql, params)
-            return cur.fetchall()
+            try:
+                # Ensure clean state
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                cur.execute("BEGIN")
+                cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                cur.execute(sql, params)
+                try:
+                    rows = cur.fetchall()
+                except Exception:
+                    rows = []
+                cur.execute("COMMIT")
+                return rows
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise e
 
 def run_explain(sql: str, analyze: bool = False, timeout_ms: int = 10000) -> Dict:
     """
@@ -67,19 +114,23 @@ def run_explain(sql: str, analyze: bool = False, timeout_ms: int = 10000) -> Dic
     with get_conn() as conn:
         with conn.cursor() as cur:
             try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                cur.execute("BEGIN")
                 # Set statement timeout
                 cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
-                
                 # Run EXPLAIN
                 cur.execute(explain_sql)
                 result = cur.fetchone()
-                
+                # Commit before parsing results
+                cur.execute("COMMIT")
                 # Handle both text and native JSON formats
                 if isinstance(result[0], str):
                     plan_json = json.loads(result[0])
                 else:
                     plan_json = result[0]
-                
                 # Normalize plan shape: EXPLAIN returns a list with one item
                 plan_obj = plan_json[0] if isinstance(plan_json, list) and plan_json else plan_json
                 # Ensure plan_obj is a dict with top-level Plan
@@ -89,8 +140,11 @@ def run_explain(sql: str, analyze: bool = False, timeout_ms: int = 10000) -> Dic
                     return {"Plan": plan_obj}
                 # Fallback
                 return {"Plan": {}}
-            
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 raise Exception(f"EXPLAIN failed: {str(e)}")
 
 def run_explain_costs(sql: str, timeout_ms: int = 10000) -> Dict:
@@ -100,9 +154,22 @@ def run_explain_costs(sql: str, timeout_ms: int = 10000) -> Dict:
     explain_sql = f"EXPLAIN (FORMAT JSON, COSTS ON, TIMING OFF) {sql}"
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
-            cur.execute(explain_sql)
-            result = cur.fetchone()
+            try:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                cur.execute("BEGIN")
+                cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                cur.execute(explain_sql)
+                result = cur.fetchone()
+                cur.execute("COMMIT")
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise e
             if isinstance(result[0], str):
                 plan_json = json.loads(result[0])
             else:
@@ -125,6 +192,15 @@ def fetch_schema(schema: str = "public", table: Optional[str] = None) -> Dict:
     Returns:
         Dictionary containing tables, columns, indexes, and constraints
     """
+    # TTL cache
+    cache_key = f"{schema}:{table or '*'}"
+    if _CACHE_SCHEMA_TTL_S > 0:
+        ts = _SCHEMA_CACHE_TS.get(cache_key, 0)
+        import time
+        if time.time() - ts < _CACHE_SCHEMA_TTL_S:
+            cached = _SCHEMA_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Base table query
@@ -150,18 +226,33 @@ def fetch_schema(schema: str = "public", table: Optional[str] = None) -> Dict:
             for tbl in tables:
                 table_name = tbl['table_name']
                 table_info = {"name": table_name, "columns": [], "indexes": [], 
-                            "primary_key": [], "foreign_keys": []}
+                              "primary_key": [], "foreign_keys": []}
                 
                 # Get columns
-                cur.execute("""
-                    SELECT column_name, data_type, 
-                           is_nullable::bool as nullable,
-                           column_default as "default"
-                    FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
-                    ORDER BY ordinal_position
-                """, (schema, table_name))
-                table_info["columns"] = cur.fetchall()
+                cur.execute(
+                    """
+                        SELECT column_name, data_type,
+                               (is_nullable = 'YES') AS nullable,
+                               column_default as "default"
+                        FROM information_schema.columns
+                        WHERE table_schema = %s AND table_name = %s
+                        ORDER BY ordinal_position
+                    """,
+                    (schema, table_name),
+                )
+                cols = cur.fetchall()
+                # Normalize keys expected by tests: name, data_type, nullable, default
+                norm_cols: List[Dict[str, Any]] = []
+                for c in cols:
+                    norm_cols.append(
+                        {
+                            "name": c.get("column_name") or c.get("name") or c.get("column"),
+                            "data_type": c.get("data_type"),
+                            "nullable": bool(c.get("nullable")),
+                            "default": c.get("default"),
+                        }
+                    )
+                table_info["columns"] = norm_cols
                 
                 # Get primary key
                 cur.execute("""
@@ -225,6 +316,9 @@ def fetch_schema(schema: str = "public", table: Optional[str] = None) -> Dict:
                 
                 result["tables"].append(table_info)
             
+            if _CACHE_SCHEMA_TTL_S > 0:
+                _SCHEMA_CACHE[cache_key] = result
+                _SCHEMA_CACHE_TS[cache_key] = time.time()
             return result
 
 
@@ -297,4 +391,51 @@ def fetch_table_stats(tables: List[str], schema: str = "public", timeout_ms: int
                     }
                 )
 
+    return out
+
+
+def get_table_stats(schema: str, table: str, timeout_ms: int = 5000) -> Dict[str, Any]:
+    """Return reltuples and basic table stats.
+
+    Returns:
+        { rows: float }
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+            cur.execute(
+                """
+                SELECT c.reltuples::bigint AS rows
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s AND c.relkind='r'
+                """,
+                (schema, table),
+            )
+            r = cur.fetchone() or {}
+            return {"rows": float(r.get("rows") or 0.0)}
+
+
+def get_column_stats(schema: str, table: str, timeout_ms: int = 5000) -> Dict[str, Dict[str, Any]]:
+    """Return pg_stats per column: { col: { n_distinct, null_frac, avg_width } }.
+    Safe defaults when missing.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+            cur.execute(
+                """
+                SELECT attname AS column, n_distinct, null_frac, avg_width
+                FROM pg_stats
+                WHERE schemaname = %s AND tablename = %s
+                """,
+                (schema, table),
+            )
+            for r in cur.fetchall() or []:
+                out[str(r.get("column"))] = {
+                    "n_distinct": float(r.get("n_distinct") or 0.0),
+                    "null_frac": float(r.get("null_frac") or 0.0),
+                    "avg_width": int(r.get("avg_width") or 0),
+                }
     return out

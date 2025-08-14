@@ -100,14 +100,29 @@ async def explain_query(req: ExplainRequest) -> ExplainResponse:
             plan = req.plan
         else:
             try:
-                plan = db.run_explain(
-                    sql=req.sql,
-                    analyze=req.analyze,
-                    timeout_ms=req.timeout_ms
-                )
+                # Handle TEMP table creation within the same session
+                sql_lc = (req.sql or "").strip().lower()
+                if sql_lc.startswith("create temporary table") or sql_lc.startswith("create temp table"):
+                    # Execute DDL; no plan
+                    db.run_sql(req.sql, timeout_ms=req.timeout_ms)
+                    plan = {}
+                else:
+                    plan = db.run_explain(
+                        sql=req.sql,
+                        analyze=req.analyze,
+                        timeout_ms=req.timeout_ms
+                    )
             except Exception as ex:
-                plan = {}
-                plan_error = str(ex)
+                # If NL explanation requested, soft-fail plan but continue
+                if req.nl:
+                    plan = {}
+                    plan_error = str(ex)
+                else:
+                    # For invalid SQL or timeouts, return HTTP 400 with normalized message
+                    detail = str(ex)
+                    if "timeout" in detail.lower():
+                        detail = f"Timeout: {detail}"
+                    raise HTTPException(status_code=400, detail=detail)
         # Analyze plan for warnings and metrics (soft)
         try:
             warnings, metrics = plan_heuristics.analyze(plan)
@@ -173,12 +188,5 @@ async def explain_query(req: ExplainRequest) -> ExplainResponse:
         return response
         
     except Exception as e:
-        # Soft-fail with 200; return stub message and empty plan
-        return ExplainResponse(
-            ok=True,
-            plan={},
-            warnings=[],
-            metrics={},
-            explanation=None,
-            message=f"stub: explain ok (plan unavailable: {str(e)})",
-        )
+        # Unexpected errors
+        raise HTTPException(status_code=400, detail=str(e))

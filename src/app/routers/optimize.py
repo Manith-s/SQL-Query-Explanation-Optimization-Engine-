@@ -12,6 +12,7 @@ from app.core import db, sql_analyzer, plan_heuristics
 from app.core.config import settings
 from app.core.optimizer import analyze as optimizer_analyze
 from app.core import whatif
+from app.core import plan_diff
 
 
 router = APIRouter()
@@ -25,6 +26,7 @@ class OptimizeRequest(BaseModel):
         default_factory=lambda: ["rewrite", "index"], description="Which advisors to run"
     )
     top_k: conint(ge=1, le=50) = Field(10, description="Max suggestions to return")
+    diff: bool = Field(False, description="Include plan diff for top index suggestion when what-if ran")
 
 
 class OptimizeResponse(BaseModel):
@@ -39,6 +41,7 @@ class OptimizeResponse(BaseModel):
     advisorsRan: List[str] = Field(default_factory=list)
     dataSources: Dict[str, Any] = Field(default_factory=dict)
     actualTopK: int = 0
+    planDiff: Optional[Dict[str, Any]] = None
 
 
 @router.post(
@@ -153,6 +156,31 @@ async def optimize_sql(request: OptimizeRequest) -> OptimizeResponse:
                 ranking = "heuristic"
                 whatif_info = {"enabled": True, "available": False, "trials": 0, "filteredByPct": 0}
 
+        # Optional Plan Diff for top index suggestion
+        resp_plan_diff: Optional[Dict[str, Any]] = None
+        if request.diff and (whatif_info.get("enabled") and whatif_info.get("available")):
+            try:
+                # Baseline costed plan
+                baseline = db.run_explain_costs(request.sql, timeout_ms=request.timeout_ms)
+                # Pick top index suggestion
+                top_index = next((s for s in suggestions if s.get("kind") == "index"), None)
+                if top_index:
+                    # Parse table and cols from statements
+                    from app.core.whatif import _parse_index_stmt  # type: ignore
+                    stmt_list = top_index.get("statements") or []
+                    if stmt_list:
+                        table, cols = _parse_index_stmt(stmt_list[0])
+                        if table and cols:
+                            with db.get_conn() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT hypopg_reset()")
+                                    cur.execute("SELECT * FROM hypopg_create_index(%s)", (f"CREATE INDEX ON {table} ({', '.join(cols)})",))
+                                    after = db.run_explain_costs(request.sql, timeout_ms=request.timeout_ms)
+                                    cur.execute("SELECT hypopg_reset()")
+                                    resp_plan_diff = plan_diff.diff_plans(baseline, after)
+            except Exception:
+                resp_plan_diff = None
+
         return OptimizeResponse(
             ok=True,
             message="stub: optimize ok",
@@ -165,6 +193,7 @@ async def optimize_sql(request: OptimizeRequest) -> OptimizeResponse:
             advisorsRan=["rewrite", "index"],
             dataSources={"plan": plan_source, "stats": stats_used},
             actualTopK=len(suggestions),
+            planDiff=resp_plan_diff,
         )
 
     except Exception as e:

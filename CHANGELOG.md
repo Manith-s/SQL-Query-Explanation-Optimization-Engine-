@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## [1.0.0] - 2025-08-14
+- Features: smarter advisor scoring/filtering; workload mode; plan diff; parallel what-if with early stop; markdown/templated NL fallback
+- Infra: Dockerized API+DB (HypoPG), health checks, metrics (gated)
+- CLI: `--table`, `--markdown`, `--diff`, `--what-if`, `workload`
+- Docs & CI: guides, tests, release workflows
+- Migration/compat: additive fields only; no breaking changes
+
 ## v0.6.0
 - Optional Prometheus metrics endpoint (`/metrics`) with bounded labels
 - Rich OpenAPI examples for `/optimize` and minimal for `/explain`

@@ -14,6 +14,8 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from app.core.config import settings
+from app.core import db as db_core
 from typing import Any, Dict, List, Optional, Tuple
 import re
 
@@ -35,6 +37,11 @@ class Suggestion:
     statements: List[str]
     alt_sql: Optional[str] = None
     safety_notes: Optional[str] = None
+    # Extended advisory fields (EPIC A)
+    score: Optional[float] = None
+    reason: Optional[str] = None
+    estReductionPct: Optional[float] = None
+    estIndexWidthBytes: Optional[int] = None
 
 
 # ---------- Helpers ----------
@@ -185,6 +192,21 @@ def suggest_rewrites(ast_info: Dict[str, Any], schema: Dict[str, Any]) -> List[S
                 )
             )
 
+    # De-correlate simple subqueries (advice only)
+    for f in (ast_info.get("filters") or []):
+        if re.search(r"\bEXISTS\s*\(\s*SELECT\b", f or "", re.IGNORECASE):
+            suggestions.append(
+                Suggestion(
+                    kind="rewrite",
+                    title="Consider de-correlating subquery",
+                    rationale="Unnest simple EXISTS subqueries to enable better join planning.",
+                    impact="medium",
+                    confidence=0.6,
+                    statements=[],
+                    alt_sql="-- Move correlated filters into JOIN conditions when equivalent",
+                )
+            )
+
     # ORDER BY ... LIMIT ... -> ensure index-compatible ordering (Top-N)
     order = ast_info.get("order_by") or []
     limit = ast_info.get("limit")
@@ -198,6 +220,20 @@ def suggest_rewrites(ast_info: Dict[str, Any], schema: Dict[str, Any]) -> List[S
                 confidence=0.8,
                 statements=[],
                 alt_sql="-- Ensure leading index columns match ORDER BY direction",
+            )
+        )
+
+    # Filter pushdown suggestion (advice only)
+    if (ast_info.get("filters") or []) and (ast_info.get("group_by") or []):
+        suggestions.append(
+            Suggestion(
+                kind="rewrite",
+                title="Push filters below GROUP BY/CTEs when safe",
+                rationale="Pushing predicates earlier reduces scanned rows before aggregation.",
+                impact="medium",
+                confidence=0.6,
+                statements=[],
+                alt_sql="-- Apply WHERE conditions inside subqueries to reduce input size",
             )
         )
 
@@ -282,11 +318,49 @@ def suggest_indexes(
         existing = existing_by_table.get(norm) or []
         if _existing_index_covers(existing, ordered_cols):
             continue
+        # EPIC A: score, filter, width, reason
+        try:
+            col_stats = db_core.get_column_stats("public", norm)
+        except Exception:
+            col_stats = {}
+        est_width = 0
+        for c in ordered_cols:
+            est_width += int((col_stats.get(c) or {}).get("avg_width") or 0)
+        base_score = 0.0
+        for c in eq_cols:
+            if c in ordered_cols:
+                base_score += 1.0
+        for c in rng_cols:
+            if c in ordered_cols:
+                base_score += 0.5
+        for c in order_cols + group_cols:
+            if c in ordered_cols:
+                base_score += 0.25
+        # Join boost (if any join column touches this table)
+        if any((c in (a.split(".")[-1], b.split(".")[-1]) for (a, b) in join_pairs)):
+            base_score *= float(settings.OPT_JOIN_COL_PRIOR_BOOST)
+        # Width penalty
+        width_penalty = 1.0
+        if est_width > 0:
+            width_penalty = max(0.1, (settings.OPT_INDEX_MAX_WIDTH_BYTES / max(est_width, 1)) ** 0.5)
+        score = base_score * width_penalty
+        # Estimated reduction percent (heuristic & deterministic)
+        est_pct = 0.0
+        if rows > 0:
+            est_pct = min(100.0, (len(eq_cols) * 10.0) + (5.0 if order_cols else 0.0))
+        # Filtering
+        if est_pct < float(settings.OPT_SUPPRESS_LOW_GAIN_PCT):
+            continue
+        if est_width > int(settings.OPT_INDEX_MAX_WIDTH_BYTES):
+            continue
 
         ix_name = _index_name(norm, ordered_cols)
         stmt = (
             f"CREATE INDEX CONCURRENTLY {ix_name} ON {norm} (" + ", ".join(ordered_cols) + ")"
         )  # suggestion only; do not execute
+        reason = (
+            f"Boosts equality({len(eq_cols)}), range({len(rng_cols)}), order/group({len(order_cols)+len(group_cols)})"
+        )
 
         suggestions.append(
             Suggestion(
@@ -296,6 +370,10 @@ def suggest_indexes(
                 impact=("high" if (len(eq_cols) >= 1 and order_cols) else "medium"),
                 confidence=(0.7 if order_cols else 0.6),
                 statements=[stmt],
+                score=float(f"{score:.3f}"),
+                reason=reason,
+                estReductionPct=float(f"{est_pct:.3f}"),
+                estIndexWidthBytes=est_width,
             )
         )
 
@@ -338,17 +416,12 @@ def analyze(
     rewrites = suggest_rewrites(ast_info, schema)
     idx = suggest_indexes(ast_info, schema, stats, options)
 
-    # Merge and deterministically order: rewrites first by title, then indexes by title
+    # Merge and deterministically order: rewrites before indexes by title/score
     suggestions = rewrites + idx
-    # Stable ordering: impact DESC, confidence DESC, title ASC
-    impact_rank = {"high": 3, "medium": 2, "low": 1}
-    suggestions.sort(
-        key=lambda s: (
-            -impact_rank.get(s.impact, 0),
-            -s.confidence,
-            s.title,
-        )
-    )
+    # Stable ordering: ensure rewrites first, within groups sort by (-score, title ASC)
+    def _group_rank(s: Suggestion) -> int:
+        return 0 if s.kind == "rewrite" else 1
+    suggestions.sort(key=lambda s: (_group_rank(s), -float(getattr(s, 'score', 0.0) or 0.0), s.title))
 
     # Convert dataclass to plain dicts for API serialization stability
     out_suggestions: List[Dict[str, Any]] = []
@@ -363,6 +436,11 @@ def analyze(
                 "statements": list(s.statements),
                 "alt_sql": s.alt_sql,
                 "safety_notes": s.safety_notes,
+                # Extended fields (optional to preserve backwards compatibility)
+                "score": _round3(float(getattr(s, 'score', 0.0))) if getattr(s, 'score', None) is not None else None,
+                "reason": getattr(s, 'reason', None),
+                "estReductionPct": _round3(float(getattr(s, 'estReductionPct', 0.0))) if getattr(s, 'estReductionPct', None) is not None else None,
+                "estIndexWidthBytes": int(getattr(s, 'estIndexWidthBytes', 0)) if getattr(s, 'estIndexWidthBytes', None) is not None else None,
             }
         )
 

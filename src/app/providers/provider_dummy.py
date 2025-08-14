@@ -5,8 +5,46 @@ This provider is useful for testing and development when a real LLM
 is not needed or available.
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any, List
+import os
 from app.core.llm_adapter import LLMProvider
+
+_TEMPLATES: Dict[str, str] | None = None
+
+def _load_templates() -> Dict[str, str]:
+    global _TEMPLATES
+    if _TEMPLATES is not None:
+        return _TEMPLATES
+    tmpl: Dict[str, str] = {}
+    try:
+        base = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(base, "resources", "nl_templates.yaml")
+        if os.path.exists(path):
+            for line in open(path, "r", encoding="utf-8"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    tmpl[k.strip()] = v.strip().strip('"')
+    except Exception:
+        tmpl = {}
+    _TEMPLATES = tmpl
+    return tmpl
+
+def _walk_plan_nodes(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    nodes: List[Dict[str, Any]] = []
+    if not isinstance(plan, dict):
+        return nodes
+    root = plan.get("Plan", plan)
+    def _rec(n: Dict[str, Any]):
+        nodes.append(n)
+        for ch in (n.get("Plans") or []):
+            if isinstance(ch, dict):
+                _rec(ch)
+    if isinstance(root, dict):
+        _rec(root)
+    return nodes
 
 class DummyLLMProvider(LLMProvider):
     """
@@ -25,39 +63,25 @@ class DummyLLMProvider(LLMProvider):
         Returns:
             A fixed response that roughly matches the expected format
         """
-        # Use prompt length to determine response type (for variety in testing)
+        # Template-driven fallback if resources are available
+        try:
+            templates = _load_templates()
+            if templates:
+                lines: List[str] = []
+                for k, msg in templates.items():
+                    if k.lower() in prompt.lower():
+                        lines.append(f"- {msg}")
+                if lines:
+                    return "\n".join(["Plan overview:"] + lines)
+        except Exception:
+            pass
+        # Deterministic simple fallbacks
         words = len(prompt.split())
-        
-        if "SELECT" not in prompt and "CREATE" not in prompt:
-            return (
-                "I can only explain SQL queries. The input doesn't appear to "
-                "contain a SQL statement."
-            )
-        
-        if words < 10:
-            return (
-                "This is a simple query that retrieves data from the database. "
-                "The execution plan is straightforward with no major performance concerns."
-            )
-            
-        if words < 30:
-            return (
-                "This query joins multiple tables to aggregate data. The execution "
-                "plan shows a mix of sequential and index scans. Consider adding an "
-                "index if this query runs frequently. The estimated row count suggests "
-                "moderate data volume."
-            )
-            
-        # Long/complex query
-        return (
-            "This is a complex query involving multiple joins and subqueries. "
-            "The execution plan reveals several potential optimization opportunities:\n"
-            "1. Consider adding an index on the join columns\n"
-            "2. The nested loop join might benefit from a hash join instead\n"
-            "3. Some predicates could be pushed down for better filtering\n\n"
-            "The query processes a significant amount of data, so these optimizations "
-            "could improve performance substantially."
-        )
+        if words < 20:
+            return "Simple plan with minimal cost; no major issues detected."
+        if words < 60:
+            return "Mixed scans and joins observed; consider indexing join/filter columns for frequent queries."
+        return "Complex plan with multiple joins and sorts; adding appropriate indexes and pushing down filters may help."
 
     def is_available(self) -> bool:  # compat for structure tests
         return True

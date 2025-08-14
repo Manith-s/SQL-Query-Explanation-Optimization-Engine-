@@ -45,6 +45,11 @@ class Settings:
     OPT_ANALYZE_DEFAULT: bool = os.getenv("OPT_ANALYZE_DEFAULT", "false").lower() == "true"
     OPT_TIMEOUT_MS_DEFAULT: int = int(os.getenv("OPT_TIMEOUT_MS_DEFAULT", "10000"))
 
+    # Advanced index advisor (EPIC A)
+    OPT_SUPPRESS_LOW_GAIN_PCT: float = float(os.getenv("OPT_SUPPRESS_LOW_GAIN_PCT", "5"))
+    OPT_INDEX_MAX_WIDTH_BYTES: int = int(os.getenv("OPT_INDEX_MAX_WIDTH_BYTES", "8192"))
+    OPT_JOIN_COL_PRIOR_BOOST: float = float(os.getenv("OPT_JOIN_COL_PRIOR_BOOST", "1.2"))
+
     # Metrics configuration
     METRICS_ENABLED: bool = os.getenv("METRICS_ENABLED", "false").lower() == "true"
     METRICS_NAMESPACE: str = os.getenv("METRICS_NAMESPACE", "qeo")
@@ -54,6 +59,17 @@ class Settings:
     WHATIF_ENABLED: bool = os.getenv("WHATIF_ENABLED", "false").lower() == "true"
     WHATIF_MAX_TRIALS: int = int(os.getenv("WHATIF_MAX_TRIALS", "10"))
     WHATIF_MIN_COST_REDUCTION_PCT: float = float(os.getenv("WHATIF_MIN_COST_REDUCTION_PCT", "5"))
+    WHATIF_PARALLELISM: int = int(os.getenv("WHATIF_PARALLELISM", "2"))
+    WHATIF_TRIAL_TIMEOUT_MS: int = int(os.getenv("WHATIF_TRIAL_TIMEOUT_MS", "4000"))
+    WHATIF_GLOBAL_TIMEOUT_MS: int = int(os.getenv("WHATIF_GLOBAL_TIMEOUT_MS", "12000"))
+    WHATIF_EARLY_STOP_PCT: float = float(os.getenv("WHATIF_EARLY_STOP_PCT", "2"))
+
+    # Caching / pooling / workload
+    CACHE_SCHEMA_TTL_S: int = int(os.getenv("CACHE_SCHEMA_TTL_S", "60"))
+    WORKLOAD_MAX_INDEXES: int = int(os.getenv("WORKLOAD_MAX_INDEXES", "5"))
+    NL_CACHE_ENABLED: bool = os.getenv("NL_CACHE_ENABLED", "true").lower() == "true"
+    POOL_MINCONN: int = int(os.getenv("POOL_MINCONN", "1"))
+    POOL_MAXCONN: int = int(os.getenv("POOL_MAXCONN", "5"))
 
     # SQL Linting configuration
     LARGE_TABLE_PATTERNS: List[str] = [

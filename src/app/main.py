@@ -9,6 +9,7 @@ import time
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import health, lint, explain, optimize, schema
+from app.routers import workload
 from app.core.metrics import init_metrics, observe_request, metrics_exposition
 
 app = FastAPI(
@@ -87,6 +88,7 @@ app.include_router(lint.router, prefix="/api/v1", tags=["lint"])
 app.include_router(explain.router, prefix="/api/v1", tags=["explain"])
 app.include_router(optimize.router, prefix="/api/v1", tags=["optimize"])
 app.include_router(schema.router, prefix="/api/v1", tags=["schema"])
+app.include_router(workload.router, prefix="/api/v1", tags=["workload"])
 
 
 @app.get("/")
